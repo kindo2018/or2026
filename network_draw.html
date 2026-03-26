@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>CSVファイルピッカーからのネットワーク図</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        .node {
+            fill: steelblue;
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+        .labels {
+            font: 10px sans-serif;
+            pointer-events: none;
+        }
+        #controls {
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background-color: #f9f9f9;
+        }
+        #controls label {
+            display: block;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <label for="csv-file">CSVファイルを選択してください (エッジリスト形式):</label>
+        <input type="file" id="csv-file" accept=".csv">
+        
+        <hr>
+        <label for="link-distance">ノード間の理想距離:</label>
+	<input type="range" id="link-distance" min="10" max="400" value="200" step="10">
+        <span id="distance-value">200</span> px
+        </div>
+
+    <svg id="network-graph" width="800" height="600"></svg>
+
+    <script>
+        const width = 800;
+        const height = 600;
+        const svg = d3.select("#network-graph")
+                      .attr("viewBox", [0, 0, width, height]);
+
+        const fileInput = document.getElementById('csv-file');
+        
+        // === スライダー要素の参照を取得 ===
+        const distanceSlider = document.getElementById('link-distance');
+        const distanceValueSpan = document.getElementById('distance-value');
+        
+        // シミュレーションとリンクフォースを保持する変数 (スライダーイベントからアクセスするため)
+        let activeSimulation = null;
+        let activeLinkForce = null;
+
+        // --- ファイル選択イベント ---
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const csvText = e.target.result;
+                const linksData = d3.csvParse(csvText);
+                
+                // 描画開始時に現在のスライダー値を渡す
+                drawNetwork(linksData, +distanceSlider.value);
+            };
+            reader.readAsText(file);
+        });
+
+        // --- スライダー入力イベント ---
+        distanceSlider.addEventListener('input', (event) => {
+            const newDistance = +event.target.value; // 値を数値に変換
+            distanceValueSpan.textContent = newDistance;
+
+            if (activeLinkForce && activeSimulation) {
+                // リンクフォースの距離を新しい値に更新
+                activeLinkForce.distance(newDistance);
+                
+                // シミュレーションを再加熱 (alphaを最大値にして再スタート) し、新しい距離で再計算させる
+                activeSimulation.alpha(1).restart();
+            }
+        });
+
+        // --- ネットワーク図描画のメイン関数 ---
+        function drawNetwork(linksData, initialDistance) {
+            
+            // 既存のグラフをクリア
+            svg.selectAll('*').remove();
+            
+            // 1. ノードリストの作成 (変更なし)
+            const nodeIds = new Set();
+            linksData.forEach(d => {
+                if (d.source) nodeIds.add(d.source);
+                if (d.target) nodeIds.add(d.target);
+            });
+            const nodesData = Array.from(nodeIds).map(id => ({ id: id }));
+
+            // 2. リンクフォースの定義
+            const linkForce = d3.forceLink(linksData)
+                .id(d => d.id)
+                // 初期距離としてスライダーの値を設定
+                .distance(initialDistance);
+            
+            // 3. 力シミュレーションの設定
+            const simulation = d3.forceSimulation(nodesData)
+                .force("link", linkForce) // 定義したリンクフォースを使用
+                .force("charge", d3.forceManyBody().strength(-200)) // 反発力
+                .force("center", d3.forceCenter(width / 2, height / 2).strength(0.5)); // 中心力
+
+            // 外部変数に参照を保存
+            activeSimulation = simulation;
+            activeLinkForce = linkForce;
+
+            // 4. エッジ、ノード、ラベルの描画 (変更なし)
+            const link = svg.append("g")
+                .attr("class", "links")
+                .selectAll("line")
+                .data(linksData)
+                .join("line")
+                .attr("class", "link")
+                .attr("stroke-width", d => d.weight ? Math.sqrt(d.weight) * 2 : 1)
+               // .text(d => d.label || ""); // CSVの 'label' 列の値をラベルとして使用
+
+            // 枝ラベル用のコンテナグループ
+            const linkLabelGroup = svg.append("g")
+                .attr("class", "link-labels");
+                
+            // 枝ラベルのテキスト要素を定義
+            const linkLabel = linkLabelGroup
+                .selectAll("text")
+                .data(linksData)
+                .join("text")
+                .attr("class", "link-label")
+                .attr("dy", "-3px") // エッジの上部にわずかにオフセット
+                .attr("font-size", "8px") 
+                .attr("fill", "#555") 
+                .attr("text-anchor", "middle") // 中央寄せ
+                .text(d => d.label || ""); // CSVの 'label' 列の値を使用
+            // ============================
+            
+            const node = svg.append("g")
+                .attr("class", "nodes")
+                .selectAll("circle")
+                .data(nodesData)
+                .join("circle")
+                .attr("class", "node")
+                .attr("r", 10)
+                .call(drag(simulation));
+
+            const label = svg.append("g")
+                .attr("class", "labels")
+                .selectAll("text")
+                .data(nodesData)
+                .join("text")
+                .text(d => d.id)
+                //.attr("dx", 12)
+                //.attr("dy", ".35em");
+
+            // 5. 力シミュレーションのティックイベント（位置更新）
+            simulation.on("tick", () => {
+                // ノードが領域外に出ないように位置を制限する処理 (前回の修正を保持)
+                node
+                    .attr("cx", d => d.x = Math.max(10, Math.min(width - 10, d.x)))
+                    .attr("cy", d => d.y = Math.max(10, Math.min(height - 10, d.y)));
+
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+		// === 枝ラベルの位置をエッジの中点に更新 ===
+                linkLabel
+                    .attr("x", d => (d.source.x + d.target.x) / 2)
+                    .attr("y", d => (d.source.y + d.target.y) / 2);
+                // ===============================================
+
+                // ノードラベルの位置を更新
+                label
+                    .attr("x", d => d.x)
+                    .attr("y", d => d.y)
+                    // ★★★ ここからノードラベルの表示範囲制御ロジックの追加 ★★★
+                    .attr("dx", function(d) {
+                        // ノードがSVGの幅の3/4より右にいる場合、ラベルをノードの左側に配置
+                        return d.x > width * 0.75 ? "-12" : "12";
+                    })
+                    .style("text-anchor", function(d) {
+                        // ラベルを左に配置するときはテキストを右寄せに (ノードの中心が右端になる)
+                        return d.x > width * 0.75 ? "end" : "start";
+                    });
+
+            });
+
+            // 6. ノードドラッグ機能の定義 (変更なし)
+            function drag(simulation) {
+              function dragstarted(event) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                event.subject.fx = event.subject.x;
+                event.subject.fy = event.subject.y;
+              }
+
+              function dragged(event) {
+                event.subject.fx = event.x;
+                event.subject.fy = event.y;
+              }
+
+              function dragended(event) {
+                if (!event.active) simulation.alphaTarget(0);
+                event.subject.fx = null;
+                event.subject.fy = null;
+              }
+
+              return d3.drag()
+                  .on("start", dragstarted)
+                  .on("drag", dragged)
+                  .on("end", dragended);
+            }
+        }
+    </script>
+</body>
+</html>
